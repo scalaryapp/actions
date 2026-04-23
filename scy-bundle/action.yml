@@ -1,0 +1,118 @@
+name: 'Scalary Bundle'
+description: 'Install scy, configure remote, and run scy bundle'
+author: 'Scalary'
+
+inputs:
+  app:
+    description: 'Application name'
+    required: false
+    default: ${{ github.event.repository.name }}
+  auth-type:
+    description: 'Authentication type: "token" or "oidc"'
+    required: false
+    default: 'token'
+  token:
+    description: 'Scalary access token (required for auth-type: token)'
+    required: false
+  account-id:
+    description: 'Scalary account ID'
+    required: true
+  org-id:
+    description: 'Scalary org ID'
+    required: true
+  org-name:
+    description: 'Scalary org name'
+    required: true
+  host:
+    description: 'Scalary remote host'
+    required: false
+    default: 'scalary.com'
+  scy-version:
+    description: 'scy release version (linux-amd64 tarball from scalary-binary-releases)'
+    required: false
+    default: '0.0.1'
+  extra-args:
+    description: 'Additional arguments to pass to scy bundle (e.g., --push-bundle=false --docker-registry-host "nscr.io/...")'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install scy
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.scy-version }}"
+        URL="https://scalary-binary-releases.s3.us-east-1.amazonaws.com/scy/${VERSION}/scy-${VERSION}-linux-amd64.tar.gz"
+        WORKDIR=$(mktemp -d)
+        trap 'rm -rf "$WORKDIR"' EXIT
+        curl -fsSL "$URL" -o "$WORKDIR/scy.tar.gz"
+        tar -xzf "$WORKDIR/scy.tar.gz" -C "$WORKDIR"
+        sudo mkdir -p /usr/local/bin
+        install_bin() {
+          local name="$1"
+          local path=""
+          if [ -f "$WORKDIR/$name" ]; then
+            path="$WORKDIR/$name"
+          else
+            path=$(find "$WORKDIR" -name "$name" -type f -print -quit)
+          fi
+          if [ -z "$path" ] || [ ! -f "$path" ]; then
+            echo "::error::Could not find ${name} in extracted archive"
+            exit 1
+          fi
+          sudo install -m 0755 "$path" "/usr/local/bin/$name"
+        }
+        install_bin scy
+        install_bin docker-credential-scy
+
+    - name: Configure Scalary remote
+      shell: bash
+      run: |
+        mkdir -p ~/.scalary
+
+        if [ "${{ inputs.auth-type }}" = "oidc" ]; then
+          cat > ~/.scalary/scalary-cli.toml <<TOML_END
+        [scalary]
+        active_remote = "ci"
+        [scalary.remotes.ci]
+        name = "ci"
+        host = "${{ inputs.host }}"
+        account_id = "${{ inputs.account-id }}"
+        org_id = "${{ inputs.org-id }}"
+        org_name = "${{ inputs.org-name }}"
+        [scalary.remotes.ci.oidc_federation]
+        provider = "github-actions"
+        TOML_END
+        else
+          if [ -z "${{ inputs.token }}" ]; then
+            echo "::error::token is required for token auth"
+            exit 1
+          fi
+          cat > ~/.scalary/scalary-cli.toml <<TOML_END
+        [scalary]
+        active_remote = "ci"
+        [scalary.remotes.ci]
+        name = "ci"
+        host = "${{ inputs.host }}"
+        account_id = "${{ inputs.account-id }}"
+        token = "${{ inputs.token }}"
+        org_id = "${{ inputs.org-id }}"
+        org_name = "${{ inputs.org-name }}"
+        TOML_END
+        fi
+
+    - name: Configure Docker credentials
+      shell: bash
+      run: |
+        scy remote configure-docker
+        # Verify the credential helper was actually configured
+        if [ ! -f ~/.docker/config.json ] || ! grep -q '"credHelpers"' ~/.docker/config.json; then
+          echo "::error::Failed to configure Docker credential helper for docker-registry.${{ inputs.host }}"
+          exit 1
+        fi
+
+    - name: Bundle
+      shell: bash
+      run: scy bundle --app "${{ inputs.app }}" --revision "$(git rev-parse HEAD)" ${{ inputs.extra-args }}
