@@ -30,7 +30,7 @@ inputs:
   scy-version:
     description: 'scy release version (linux-amd64 tarball from scalary-binary-releases)'
     required: false
-    default: '0.0.1'
+    default: 'latest'
   extra-args:
     description: 'Additional arguments to pass to scy bundle (e.g., --push-bundle=false --docker-registry-host "nscr.io/...")'
     required: false
@@ -44,6 +44,13 @@ runs:
       run: |
         set -euo pipefail
         VERSION="${{ inputs.scy-version }}"
+        if [ "$VERSION" = "latest" ]; then
+          VERSION="$(curl -fsSL "https://scalary-binary-releases.s3.us-east-1.amazonaws.com/scy/latest-version" | tr -d '\r\n[:space:]')"
+          if [ -z "$VERSION" ]; then
+            echo "::error::latest-version endpoint returned empty version"
+            exit 1
+          fi
+        fi
         URL="https://scalary-binary-releases.s3.us-east-1.amazonaws.com/scy/${VERSION}/scy-${VERSION}-linux-amd64.tar.gz"
         WORKDIR=$(mktemp -d)
         trap 'rm -rf "$WORKDIR"' EXIT
